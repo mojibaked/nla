@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "ignoreDeprecations": "6.0",
+    "types": [
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@nla/protocol": [
+        "packages/protocol/src/index.ts"
+      ],
+      "@nla/host-core": [
+        "packages/host-core/src/index.ts"
+      ],
+      "@nla/sdk-core": [
+        "packages/sdk-core/src/index.ts"
+      ],
+      "@nla/sdk-http": [
+        "packages/sdk-http/src/index.ts"
+      ],
+      "@nla/sdk-cli": [
+        "packages/sdk-cli/src/index.ts"
+      ],
+      "@nla/test": [
+        "packages/test/src/index.ts"
+      ],
+      "@nla/transport-http": [
+        "packages/transport-http/src/index.ts"
+      ],
+      "@nla/transport-stdio-jsonl": [
+        "packages/transport-stdio-jsonl/src/index.ts"
+      ]
+    },
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "skipLibCheck": true
+  }
+}

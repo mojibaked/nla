@@ -1,0 +1,29 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/host-core"
+    },
+    {
+      "path": "./packages/sdk-core"
+    },
+    {
+      "path": "./packages/sdk-http"
+    },
+    {
+      "path": "./packages/sdk-cli"
+    },
+    {
+      "path": "./packages/test"
+    },
+    {
+      "path": "./packages/transport-http"
+    },
+    {
+      "path": "./packages/transport-stdio-jsonl"
+    }
+  ]
+}

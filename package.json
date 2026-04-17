@@ -1,0 +1,29 @@
+{
+  "name": "nla",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Natural Language Adapters protocol and SDK workspace.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "clean": "rm -rf packages/*/dist *.tsbuildinfo packages/*/*.tsbuildinfo",
+    "example:http-transport-server": "npm run build --silent && node examples/http-transport-server.mjs",
+    "example:stdio-echo": "npm run build --silent && node examples/stdio-echo-adapter.mjs",
+    "example:stdio-cli": "npm run build --silent && node examples/stdio-cli-adapter.mjs",
+    "example:stdio-http": "npm run build --silent && node examples/stdio-http-adapter.mjs",
+    "example:stdio-openrouter": "npm run build --silent && node examples/openrouter-chat-repl.mjs",
+    "example:stdio-openrouter-adapter": "npm run build --silent && node examples/stdio-openrouter-adapter.mjs",
+    "test": "npm run build --silent && node --test tests/*.test.mjs",
+    "typecheck": "tsc -b tsconfig.json --pretty false"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^6.0.2"
+  }
+}

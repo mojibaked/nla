@@ -1,0 +1,25 @@
+{
+  "name": "@nla/sdk-cli",
+  "version": "0.1.0",
+  "description": "CLI adapter helpers for Natural Language Adapters.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nla/protocol": "0.1.0",
+    "@nla/sdk-core": "0.1.0",
+    "@nla/transport-stdio-jsonl": "0.1.0"
+  }
+}
