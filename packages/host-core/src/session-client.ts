@@ -395,6 +395,7 @@ export const createSessionClient = (
         case "session.activity":
         case "session.execution":
         case "session.artifact":
+        case "session.started":
           if (correlationId) {
             emitTurnMessage(session, correlationId, message);
           }

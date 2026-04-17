@@ -49,6 +49,13 @@ import {
   type NlaSessionStatusData,
   type NlaSessionStopMessage,
   type NlaSessionStoppedMessage,
+  type NlaThreadSummaryData,
+  type NlaThreadsHistoryItemData,
+  type NlaThreadsHistoryItemMessage,
+  type NlaThreadsHistoryRequestMessage,
+  type NlaThreadsListCompletedData,
+  type NlaThreadsListItemMessage,
+  type NlaThreadsListRequestMessage,
   type NlaValidationIssue
 } from "@nla/protocol";
 
@@ -70,6 +77,7 @@ export interface NlaRuntimeOptions {
 export interface NlaRuntimeSession {
   id: string;
   providerRef?: string;
+  threadRef?: string;
   state?: Record<string, unknown>;
 }
 
@@ -78,8 +86,17 @@ export interface NlaAdapterDefinition {
   name: string;
   version?: string;
   capabilities?: NlaCapabilities;
+  profiles?: Record<string, unknown>;
   operations?: NlaOperationDescriptor[];
   invoke?: (ctx: NlaInvokeHandlerContext, message: NlaInvokeRequestMessage) => MaybePromise<unknown>;
+  threadsList?: (
+    ctx: NlaThreadsHandlerContext<NlaThreadsListRequestMessage>,
+    message: NlaThreadsListRequestMessage
+  ) => MaybePromise<void>;
+  threadsHistory?: (
+    ctx: NlaThreadsHandlerContext<NlaThreadsHistoryRequestMessage>,
+    message: NlaThreadsHistoryRequestMessage
+  ) => MaybePromise<void>;
   sessionStart?: (ctx: NlaSessionHandlerContext, message: NlaSessionStartMessage) => MaybePromise<void>;
   sessionResume?: (ctx: NlaSessionHandlerContext, message: NlaSessionResumeMessage) => MaybePromise<void>;
   sessionMessage?: (ctx: NlaSessionHandlerContext, message: NlaSessionMessage) => MaybePromise<void>;
@@ -145,6 +162,16 @@ export interface NlaInvokeHandlerContext extends NlaBaseHandlerContext<NlaInvoke
   artifact(artifact: NlaArtifactData): void;
   complete(output?: unknown): void;
   cancel(reason?: string): void;
+  fail(error: string | Omit<NlaFailedData, "ok">): void;
+  isSettled(): boolean;
+}
+
+export interface NlaThreadsHandlerContext<
+  TRequest extends NlaThreadsListRequestMessage | NlaThreadsHistoryRequestMessage
+> extends NlaBaseHandlerContext<TRequest> {
+  thread(thread: NlaThreadSummaryData): void;
+  historyItem(item: NlaThreadsHistoryItemData): void;
+  complete(data?: NlaThreadsListCompletedData): void;
   fail(error: string | Omit<NlaFailedData, "ok">): void;
   isSettled(): boolean;
 }
@@ -227,6 +254,10 @@ interface SessionHandlerState {
   interruptResultEmitted?: boolean;
 }
 
+interface ThreadsHandlerState {
+  terminal: boolean;
+}
+
 const requestTurnId = (
   request:
     | NlaSessionMessage
@@ -269,6 +300,7 @@ class AdapterRuntime implements NlaAdapterRuntime {
     return {
       adapter: this.#identity(),
       capabilities: this.adapter.capabilities,
+      profiles: this.adapter.profiles,
       operations: this.adapter.operations
     };
   }
@@ -296,7 +328,8 @@ class AdapterRuntime implements NlaAdapterRuntime {
         emitter.emit(
           this.#message("initialized", {
             adapter: this.#identity(),
-            capabilities: this.adapter.capabilities
+            capabilities: this.adapter.capabilities,
+            profiles: this.adapter.profiles
           }, message.correlationId)
         );
         break;
@@ -305,6 +338,12 @@ class AdapterRuntime implements NlaAdapterRuntime {
         break;
       case "invoke.request":
         await this.#handleInvoke(message, emitter);
+        break;
+      case "threads.list.request":
+        await this.#handleThreadsList(message, emitter);
+        break;
+      case "threads.history.request":
+        await this.#handleThreadsHistory(message, emitter);
         break;
       case "session.start":
         await this.#handleSessionStart(message, emitter);
@@ -335,6 +374,64 @@ class AdapterRuntime implements NlaAdapterRuntime {
     }
 
     await emitter.drain();
+  }
+
+  async #handleThreadsList(
+    message: NlaThreadsListRequestMessage,
+    emitter: QueuedMessageEmitter
+  ): Promise<void> {
+    const state: ThreadsHandlerState = { terminal: false };
+    const ctx = this.#threadsContext(message, emitter, state);
+
+    try {
+      if (this.adapter.threadsList) {
+        await this.adapter.threadsList(ctx, message);
+        if (!state.terminal) {
+          ctx.complete();
+        }
+      } else {
+        ctx.fail({
+          code: "capability_error",
+          message: "Adapter does not implement thread listing."
+        });
+      }
+    } catch (error) {
+      if (!state.terminal) {
+        ctx.fail({
+          code: "runtime_error",
+          message: errorMessage(error)
+        });
+      }
+    }
+  }
+
+  async #handleThreadsHistory(
+    message: NlaThreadsHistoryRequestMessage,
+    emitter: QueuedMessageEmitter
+  ): Promise<void> {
+    const state: ThreadsHandlerState = { terminal: false };
+    const ctx = this.#threadsContext(message, emitter, state);
+
+    try {
+      if (this.adapter.threadsHistory) {
+        await this.adapter.threadsHistory(ctx, message);
+        if (!state.terminal) {
+          ctx.complete();
+        }
+      } else {
+        ctx.fail({
+          code: "capability_error",
+          message: "Adapter does not implement thread history."
+        });
+      }
+    } catch (error) {
+      if (!state.terminal) {
+        ctx.fail({
+          code: "runtime_error",
+          message: errorMessage(error)
+        });
+      }
+    }
   }
 
   async #handleInvoke(
@@ -517,6 +614,7 @@ class AdapterRuntime implements NlaAdapterRuntime {
     emitter: QueuedMessageEmitter
   ): Promise<void> {
     const session = this.#ensureSession(message.data.sessionId);
+    session.threadRef = message.data.threadRef ?? session.threadRef;
     const state: SessionHandlerState = { terminal: false };
     const ctx = this.#sessionContext(message, session, emitter, state);
 
@@ -547,6 +645,7 @@ class AdapterRuntime implements NlaAdapterRuntime {
   ): Promise<void> {
     const session = this.#ensureSession(message.data.sessionId);
     session.providerRef = message.data.providerRef ?? session.providerRef;
+    session.threadRef = message.data.threadRef ?? session.threadRef;
     session.state = message.data.state ?? session.state;
 
     const state: SessionHandlerState = { terminal: false };
@@ -816,10 +915,12 @@ class AdapterRuntime implements NlaAdapterRuntime {
       },
       started: (data = {}) => {
         session.providerRef = data.providerRef ?? session.providerRef;
+        session.threadRef = data.threadRef ?? session.threadRef;
         session.state = data.state ?? session.state;
         emit("session.started", {
           sessionId: session.id,
           providerRef: session.providerRef,
+          threadRef: session.threadRef,
           state: session.state
         });
       },
@@ -947,6 +1048,67 @@ class AdapterRuntime implements NlaAdapterRuntime {
         );
         emitter.emit(event);
       }
+    };
+  }
+
+  #threadsContext<TRequest extends NlaThreadsListRequestMessage | NlaThreadsHistoryRequestMessage>(
+    request: TRequest,
+    emitter: QueuedMessageEmitter,
+    state: ThreadsHandlerState
+  ): NlaThreadsHandlerContext<TRequest> {
+    const correlationId = request.correlationId ?? request.id;
+
+    const emit = <TType extends string, TData>(
+      type: TType,
+      data: TData,
+      options: { correlationId?: string; id?: string; timestamp?: string } = {}
+    ): void => {
+      emitter.emit(
+        this.#message(type, data, options.correlationId ?? correlationId, options.id, options.timestamp) as NlaMessage
+      );
+    };
+
+    const failType = request.type === "threads.list.request"
+      ? "threads.list.failed"
+      : "threads.history.failed";
+    const completedType = request.type === "threads.list.request"
+      ? "threads.list.completed"
+      : "threads.history.completed";
+
+    return {
+      adapter: this.#identity(),
+      request,
+      emit,
+      createId: (prefix = "id") => this.#createId(prefix),
+      thread: (thread) => {
+        if (state.terminal || request.type !== "threads.list.request") return;
+        const event: NlaThreadsListItemMessage = this.#message(
+          "threads.list.item",
+          thread,
+          correlationId
+        );
+        emitter.emit(event);
+      },
+      historyItem: (item) => {
+        if (state.terminal || request.type !== "threads.history.request") return;
+        const event: NlaThreadsHistoryItemMessage = this.#message(
+          "threads.history.item",
+          item,
+          correlationId
+        );
+        emitter.emit(event);
+      },
+      complete: (data = {}) => {
+        if (state.terminal) return;
+        state.terminal = true;
+        emit(completedType, data);
+      },
+      fail: (error) => {
+        if (state.terminal) return;
+        state.terminal = true;
+        emit(failType, normalizeFailure(error));
+      },
+      isSettled: () => state.terminal
     };
   }
 
