@@ -23,7 +23,9 @@ import {
   type NlaOperationDescriptor,
   type NlaInteractionPayload,
   type NlaSessionActivityMessage,
+  type NlaSessionActivityData,
   type NlaSessionArtifactMessage,
+  type NlaSessionArtifactData,
   type NlaSessionCompletedMessage,
   type NlaSessionControlDefinition,
   type NlaSessionControlMessage,
@@ -158,8 +160,8 @@ export interface NlaInvokeHandlerContext extends NlaBaseHandlerContext<NlaInvoke
   outputDelta(delta: unknown, options?: NlaInvokeOutputDeltaOptions): NlaInvokeOutputDeltaRef;
   progress(label: string, progress?: number, data?: unknown): void;
   log(message: string, level?: NlaInvokeLogData["level"], data?: unknown): void;
-  activity(activity: NlaActivityData): void;
-  artifact(artifact: NlaArtifactData): void;
+  activity(activity: NlaSessionActivityData): void;
+  artifact(artifact: NlaSessionArtifactData): void;
   complete(output?: unknown): void;
   cancel(reason?: string): void;
   fail(error: string | Omit<NlaFailedData, "ok">): void;
@@ -173,6 +175,44 @@ export interface NlaThreadsHandlerContext<
   historyItem(item: NlaThreadsHistoryItemData): void;
   complete(data?: NlaThreadsListCompletedData): void;
   fail(error: string | Omit<NlaFailedData, "ok">): void;
+  isSettled(): boolean;
+}
+
+export interface NlaSessionEmitterOptions {
+  correlationId?: string;
+  turnId?: string;
+}
+
+export interface NlaSessionEmitterContext {
+  readonly adapter: NlaAdapterIdentity;
+  readonly session: NlaRuntimeSession;
+  emit<TType extends string, TData>(
+    type: TType,
+    data: TData,
+    options?: {
+      correlationId?: string;
+      id?: string;
+      timestamp?: string;
+    }
+  ): void;
+  createId(prefix?: string): string;
+  setProviderRef(providerRef?: string): void;
+  setState(state?: Record<string, unknown>): void;
+  mergeState(partial: Record<string, unknown>): void;
+  started(data?: Omit<NlaSessionStartedData, "sessionId">): void;
+  status(status: NlaSessionStatus, label?: string, data?: unknown): void;
+  execution(execution: Omit<NlaSessionExecutionData, "sessionId">): void;
+  message(message: Omit<NlaSessionMessageData, "sessionId">): void;
+  reply(text: string, metadata?: Record<string, unknown>): void;
+  messageDelta(message: Omit<NlaSessionMessageDeltaData, "sessionId">): void;
+  activity(activity: NlaSessionActivityData): void;
+  artifact(artifact: NlaSessionArtifactData): void;
+  requestInput(request: Omit<NlaSessionInteractionRequestedData, "sessionId">): void;
+  resolveInput(resolution: Omit<NlaSessionInteractionResolvedData, "sessionId">): void;
+  interruptResult(result: Omit<NlaSessionInterruptResultData, "sessionId">): void;
+  complete(): void;
+  fail(error: string | Omit<NlaFailedData, "ok">): void;
+  stopped(): void;
   isSettled(): boolean;
 }
 
@@ -199,14 +239,16 @@ export interface NlaSessionHandlerContext
   messageDelta(message: Omit<NlaSessionMessageDeltaData, "sessionId">): void;
   controls(controls: ReadonlyArray<NlaSessionControlDefinition>): void;
   controlState(state: Omit<NlaSessionControlStateData, "sessionId">): void;
-  activity(activity: NlaActivityData): void;
-  artifact(artifact: NlaArtifactData): void;
+  activity(activity: NlaSessionActivityData): void;
+  artifact(artifact: NlaSessionArtifactData): void;
   requestInput(request: Omit<NlaSessionInteractionRequestedData, "sessionId">): void;
   resolveInput(resolution: Omit<NlaSessionInteractionResolvedData, "sessionId">): void;
   interruptResult(result: Omit<NlaSessionInterruptResultData, "sessionId">): void;
+  createSessionEmitter(options?: NlaSessionEmitterOptions): NlaSessionEmitterContext;
   complete(): void;
   fail(error: string | Omit<NlaFailedData, "ok">): void;
   stopped(): void;
+  isSettled(): boolean;
 }
 
 export function defineAdapter<T extends NlaAdapterDefinition>(adapter: T): T {
@@ -277,6 +319,24 @@ const requestTurnId = (
   }
 
   return undefined;
+};
+
+const withDefaultTurnId = <T extends { turnId?: string }>(
+  value: T,
+  defaultTurnId?: string
+): T => {
+  if (!defaultTurnId) {
+    return value;
+  }
+
+  if (typeof value.turnId === "string" && value.turnId.trim()) {
+    return value;
+  }
+
+  return {
+    ...value,
+    turnId: defaultTurnId
+  };
 };
 
 class AdapterRuntime implements NlaAdapterRuntime {
@@ -871,98 +931,192 @@ class AdapterRuntime implements NlaAdapterRuntime {
     const correlationId = request.correlationId ?? request.id ?? session.id;
     const currentTurnId = requestTurnId(request);
 
-    const emit = <TType extends string, TData>(
-      type: TType,
-      data: TData,
-      options: { correlationId?: string; id?: string; timestamp?: string } = {}
-    ): void => {
-      emitter.emit(
-        this.#message(type, data, options.correlationId ?? correlationId, options.id, options.timestamp) as NlaMessage
-      );
+    const sessionEmitter = (
+      emitterState: Pick<SessionHandlerState, "terminal">,
+      options: {
+        correlationId?: string;
+        turnId?: string;
+        requestInputTurnId?: string;
+      } = {}
+    ): NlaSessionEmitterContext => {
+      const defaultTurnId = options.turnId?.trim() ? options.turnId.trim() : undefined;
+      const defaultRequestInputTurnId = options.requestInputTurnId?.trim()
+        ? options.requestInputTurnId.trim()
+        : defaultTurnId;
+
+      const emit = <TType extends string, TData>(
+        type: TType,
+        data: TData,
+        emitOptions: { correlationId?: string; id?: string; timestamp?: string } = {}
+      ): void => {
+        emitter.emit(
+          this.#message(
+            type,
+            data,
+            emitOptions.correlationId ?? options.correlationId,
+            emitOptions.id,
+            emitOptions.timestamp
+          ) as NlaMessage
+        );
+      };
+
+      const fail = (error: string | Omit<NlaFailedData, "ok">): void => {
+        if (emitterState.terminal) return;
+        emitterState.terminal = true;
+        const event: NlaSessionFailedMessage = this.#message(
+          "session.failed",
+          {
+            sessionId: session.id,
+            ...normalizeFailure(error)
+          },
+          options.correlationId
+        );
+        emitter.emit(event);
+      };
+
+      return {
+        adapter: this.#identity(),
+        session,
+        emit,
+        createId: (prefix = "id") => this.#createId(prefix),
+        setProviderRef: (providerRef) => {
+          session.providerRef = providerRef;
+        },
+        setState: (nextState) => {
+          session.state = nextState;
+        },
+        mergeState: (partial) => {
+          session.state = {
+            ...(session.state || {}),
+            ...partial
+          };
+        },
+        started: (data = {}) => {
+          session.providerRef = data.providerRef ?? session.providerRef;
+          session.threadRef = data.threadRef ?? session.threadRef;
+          session.state = data.state ?? session.state;
+          emit("session.started", {
+            sessionId: session.id,
+            providerRef: session.providerRef,
+            threadRef: session.threadRef,
+            state: session.state
+          });
+        },
+        status: (status, label, data) => {
+          const eventData = withDefaultTurnId<NlaSessionStatusData>({
+            sessionId: session.id,
+            status,
+            label,
+            data
+          }, defaultTurnId);
+          emit("session.status", eventData);
+        },
+        execution: (execution) => {
+          emit("session.execution", withDefaultTurnId<NlaSessionExecutionData>({
+            sessionId: session.id,
+            ...execution
+          }, defaultTurnId));
+        },
+        message: (message) => {
+          emit("session.message", withDefaultTurnId<NlaSessionMessageData>({
+            sessionId: session.id,
+            ...message
+          }, defaultTurnId));
+        },
+        reply: (text, metadata) => {
+          const eventData = withDefaultTurnId<NlaSessionMessageData>({
+            sessionId: session.id,
+            role: "assistant",
+            text,
+            metadata
+          }, defaultTurnId);
+          emit("session.message", eventData);
+        },
+        messageDelta: (message) => {
+          emit("session.message.delta", withDefaultTurnId<NlaSessionMessageDeltaData>({
+            sessionId: session.id,
+            ...message
+          }, defaultTurnId));
+        },
+        activity: (activity) => {
+          const event: NlaSessionActivityMessage = this.#message(
+            "session.activity",
+            withDefaultTurnId(activity, defaultTurnId),
+            options.correlationId
+          );
+          emitter.emit(event);
+        },
+        artifact: (artifact) => {
+          const event: NlaSessionArtifactMessage = this.#message(
+            "session.artifact",
+            withDefaultTurnId(artifact, defaultTurnId),
+            options.correlationId
+          );
+          emitter.emit(event);
+        },
+        requestInput: (input) => {
+          const resolvedTurnId = defaultRequestInputTurnId
+            || (typeof input.turnId === "string" && input.turnId.trim() ? input.turnId.trim() : undefined);
+
+          emit("session.execution", {
+            sessionId: session.id,
+            state: "awaiting_input",
+            turnId: resolvedTurnId,
+            interruptible: true
+          });
+          emit("session.interaction.requested", withDefaultTurnId<NlaSessionInteractionRequestedData>({
+            sessionId: session.id,
+            ...input
+          }, resolvedTurnId));
+        },
+        resolveInput: (resolution) => {
+          emit("session.interaction.resolved", withDefaultTurnId<NlaSessionInteractionResolvedData>({
+            sessionId: session.id,
+            ...resolution
+          }, defaultTurnId));
+        },
+        interruptResult: (result) => {
+          emit("session.interrupt.result", withDefaultTurnId<NlaSessionInterruptResultData>({
+            sessionId: session.id,
+            ...result
+          }, defaultTurnId));
+        },
+        complete: () => {
+          if (emitterState.terminal) return;
+          emitterState.terminal = true;
+          const event: NlaSessionCompletedMessage = this.#message(
+            "session.completed",
+            { sessionId: session.id },
+            options.correlationId
+          );
+          emitter.emit(event);
+        },
+        fail,
+        stopped: () => {
+          if (emitterState.terminal) return;
+          emitterState.terminal = true;
+          const event: NlaSessionStoppedMessage = this.#message(
+            "session.stopped",
+            { sessionId: session.id },
+            options.correlationId
+          );
+          emitter.emit(event);
+        },
+        isSettled: () => emitterState.terminal
+      };
     };
 
-    const fail = (error: string | Omit<NlaFailedData, "ok">): void => {
-      if (state.terminal) return;
-      state.terminal = true;
-      const event: NlaSessionFailedMessage = this.#message(
-        "session.failed",
-        {
-          sessionId: session.id,
-          ...normalizeFailure(error)
-        },
-        correlationId
-      );
-      emitter.emit(event);
-    };
+    const requestEmitter = sessionEmitter(state, {
+      correlationId,
+      requestInputTurnId: currentTurnId
+    });
 
     return {
-      adapter: this.#identity(),
       request,
-      session,
-      emit,
-      createId: (prefix = "id") => this.#createId(prefix),
-      setProviderRef: (providerRef) => {
-        session.providerRef = providerRef;
-      },
-      setState: (nextState) => {
-        session.state = nextState;
-      },
-      mergeState: (partial) => {
-        session.state = {
-          ...(session.state || {}),
-          ...partial
-        };
-      },
-      started: (data = {}) => {
-        session.providerRef = data.providerRef ?? session.providerRef;
-        session.threadRef = data.threadRef ?? session.threadRef;
-        session.state = data.state ?? session.state;
-        emit("session.started", {
-          sessionId: session.id,
-          providerRef: session.providerRef,
-          threadRef: session.threadRef,
-          state: session.state
-        });
-      },
-      status: (status, label, data) => {
-        const eventData: NlaSessionStatusData = {
-          sessionId: session.id,
-          status,
-          label,
-          data
-        };
-        emit("session.status", eventData);
-      },
-      execution: (execution) => {
-        emit("session.execution", {
-          sessionId: session.id,
-          ...execution
-        });
-      },
-      message: (message) => {
-        emit("session.message", {
-          sessionId: session.id,
-          ...message
-        });
-      },
-      reply: (text, metadata) => {
-        const eventData: NlaSessionMessageData = {
-          sessionId: session.id,
-          role: "assistant",
-          text,
-          metadata
-        };
-        emit("session.message", eventData);
-      },
-      messageDelta: (message) => {
-        emit("session.message.delta", {
-          sessionId: session.id,
-          ...message
-        });
-      },
+      ...requestEmitter,
       controls: (controls) => {
         state.controlsEmitted = true;
-        emit("session.controls", {
+        requestEmitter.emit("session.controls", {
           sessionId: session.id,
           controls: [...controls]
         }, {
@@ -973,7 +1127,7 @@ class AdapterRuntime implements NlaAdapterRuntime {
       },
       controlState: (controlState) => {
         state.controlStateEmitted = true;
-        emit("session.control.state", {
+        requestEmitter.emit("session.control.state", {
           sessionId: session.id,
           ...controlState
         }, {
@@ -982,72 +1136,26 @@ class AdapterRuntime implements NlaAdapterRuntime {
             : correlationId
         });
       },
-      activity: (activity) => {
-        const event: NlaSessionActivityMessage = this.#message(
-          "session.activity",
-          activity,
-          correlationId
-        );
-        emitter.emit(event);
-      },
-      artifact: (artifact) => {
-        const event: NlaSessionArtifactMessage = this.#message(
-          "session.artifact",
-          artifact,
-          correlationId
-        );
-        emitter.emit(event);
-      },
-      requestInput: (input) => {
-        emit("session.execution", {
-          sessionId: session.id,
-          state: "awaiting_input",
-          turnId: currentTurnId,
-          interruptible: true
-        });
-        emit("session.interaction.requested", {
-          sessionId: session.id,
-          ...input
-        });
-      },
-      resolveInput: (resolution) => {
-        emit("session.interaction.resolved", {
-          sessionId: session.id,
-          ...resolution
-        });
-      },
       interruptResult: (result) => {
         state.interruptResultEmitted = true;
-        emit("session.interrupt.result", {
+        requestEmitter.emit("session.interrupt.result", {
           sessionId: session.id,
           ...result
         }, {
           correlationId: "correlationId" in request
             ? request.correlationId ?? request.id ?? correlationId
-            : correlationId
+          : correlationId
         });
       },
-      complete: () => {
-        if (state.terminal) return;
-        state.terminal = true;
-        const event: NlaSessionCompletedMessage = this.#message(
-          "session.completed",
-          { sessionId: session.id },
-          correlationId
-        );
-        emitter.emit(event);
-      },
-      fail,
-      stopped: () => {
-        if (state.terminal) return;
-        state.terminal = true;
-        const event: NlaSessionStoppedMessage = this.#message(
-          "session.stopped",
-          { sessionId: session.id },
-          correlationId
-        );
-        emitter.emit(event);
-      }
+      createSessionEmitter: (options = {}) =>
+        sessionEmitter(
+          { terminal: false },
+          {
+            correlationId: options.correlationId,
+            turnId: options.turnId,
+            requestInputTurnId: options.turnId
+          }
+        )
     };
   }
 

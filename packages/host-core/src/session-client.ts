@@ -28,6 +28,7 @@ export interface NlaSessionTransportHandle {
 export interface NlaSessionClient {
   readonly registerSession: (input: {
     readonly transport: NlaSessionTransportHandle;
+    readonly onUnsolicitedMessage?: (message: NlaMessage) => void;
   }) => void;
   readonly handleMessage: (sessionId: string, message: NlaMessage) => void;
   readonly handleFailure: (sessionId: string, error: Error) => void;
@@ -97,6 +98,7 @@ interface SessionState {
   readonly transport: NlaSessionTransportHandle;
   readonly controlWaiters: Map<string, ControlWaiter>;
   readonly pendingTurns: Map<string, PendingTurn>;
+  readonly onUnsolicitedMessage?: (message: NlaMessage) => void;
 }
 
 const createPushAsyncIterable = <T>(): PushAsyncIterable<T> => {
@@ -285,6 +287,48 @@ export const createSessionClient = (
     }
   };
 
+  const findPendingTurnCorrelationId = (
+    session: SessionState,
+    turnId: string
+  ): string | undefined => {
+    for (const [correlationId, pendingTurn] of session.pendingTurns) {
+      if (pendingTurn.turnId === turnId) {
+        return correlationId;
+      }
+    }
+
+    return undefined;
+  };
+
+  const messageTurnId = (message: NlaMessage): string | undefined => {
+    switch (message.type) {
+      case "session.message":
+      case "session.message.delta":
+      case "session.activity":
+      case "session.artifact":
+      case "session.interaction.requested":
+      case "session.interaction.resolved":
+      case "session.status":
+      case "session.execution":
+        return stringField(message.data.turnId);
+      default:
+        return undefined;
+    }
+  };
+
+  const pendingTurnCorrelationIdForMessage = (
+    session: SessionState,
+    message: NlaMessage
+  ): string | undefined => {
+    const correlationId = stringField(message.correlationId);
+    if (correlationId && session.pendingTurns.has(correlationId)) {
+      return correlationId;
+    }
+
+    const turnId = messageTurnId(message);
+    return turnId ? findPendingTurnCorrelationId(session, turnId) : undefined;
+  };
+
   const emitTurnMessage = (
     session: SessionState,
     correlationId: string,
@@ -360,12 +404,13 @@ export const createSessionClient = (
   };
 
   return {
-    registerSession: ({ transport }) => {
+    registerSession: ({ transport, onUnsolicitedMessage }) => {
       sessions.set(transport.sessionId, {
         sessionId: transport.sessionId,
         transport,
         controlWaiters: new Map(),
-        pendingTurns: new Map()
+        pendingTurns: new Map(),
+        onUnsolicitedMessage
       });
     },
 
@@ -389,6 +434,8 @@ export const createSessionClient = (
         }
       }
 
+      const pendingTurnCorrelationId = pendingTurnCorrelationIdForMessage(session, message);
+
       switch (message.type) {
         case "session.message.delta":
         case "session.message":
@@ -396,39 +443,51 @@ export const createSessionClient = (
         case "session.execution":
         case "session.artifact":
         case "session.started":
-          if (correlationId) {
-            emitTurnMessage(session, correlationId, message);
+          if (pendingTurnCorrelationId) {
+            emitTurnMessage(session, pendingTurnCorrelationId, message);
+            return;
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.interaction.requested":
-          if (correlationId) {
-            emitTurnMessage(session, correlationId, message);
-            pauseTurn(session, correlationId);
+          if (pendingTurnCorrelationId) {
+            emitTurnMessage(session, pendingTurnCorrelationId, message);
+            pauseTurn(session, pendingTurnCorrelationId);
+            return;
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.interaction.resolved":
-          if (correlationId) {
-            emitTurnMessage(session, correlationId, message);
+          if (pendingTurnCorrelationId) {
+            emitTurnMessage(session, pendingTurnCorrelationId, message);
+            return;
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.status":
-          if (correlationId) {
+          if (pendingTurnCorrelationId) {
             if (message.data.status === "idle" || message.data.status === "completed") {
-              emitTurnMessage(session, correlationId, message);
-              finishTurn(session, correlationId);
+              emitTurnMessage(session, pendingTurnCorrelationId, message);
+              finishTurn(session, pendingTurnCorrelationId);
+              return;
             }
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.completed":
-          if (correlationId) {
-            emitTurnMessage(session, correlationId, message);
-            finishTurn(session, correlationId);
+          if (pendingTurnCorrelationId) {
+            emitTurnMessage(session, pendingTurnCorrelationId, message);
+            finishTurn(session, pendingTurnCorrelationId);
+            return;
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.failed":
-          if (correlationId) {
-            failTurn(session, correlationId, message.data.message, message.data.code);
+          if (pendingTurnCorrelationId) {
+            failTurn(session, pendingTurnCorrelationId, message.data.message, message.data.code);
+            return;
           }
+          session.onUnsolicitedMessage?.(message);
           return;
         case "session.interrupt.result":
           if (matchedControlWaiter || message.data.status === "interrupted") {
@@ -442,6 +501,7 @@ export const createSessionClient = (
           closeSessionState(sessionId);
           return;
         default:
+          session.onUnsolicitedMessage?.(message);
           return;
       }
     },

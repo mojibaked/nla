@@ -191,6 +191,14 @@ export interface NlaArtifactData {
   metadata?: Record<string, unknown>;
 }
 
+export interface NlaSessionActivityData extends NlaActivityData {
+  turnId?: string;
+}
+
+export interface NlaSessionArtifactData extends NlaArtifactData {
+  turnId?: string;
+}
+
 export interface NlaCompletedData {
   ok: true;
   output?: unknown;
@@ -232,6 +240,7 @@ export interface NlaSessionMessagePart {
 
 export interface NlaSessionMessageData {
   sessionId: string;
+  turnId?: string;
   role: NlaMessageRole;
   text?: string;
   parts?: NlaSessionMessagePart[];
@@ -240,6 +249,7 @@ export interface NlaSessionMessageData {
 
 export interface NlaSessionMessageDeltaData {
   sessionId: string;
+  turnId?: string;
   messageId: string;
   role: NlaMessageRole;
   delta: string;
@@ -254,6 +264,7 @@ export interface NlaInteractionPayload {
 
 export interface NlaSessionInteractionRequestedData {
   sessionId: string;
+  turnId?: string;
   request: NlaInteractionPayload;
 }
 
@@ -265,6 +276,7 @@ export interface NlaSessionInteractionResolveData {
 
 export interface NlaSessionInteractionResolvedData {
   sessionId: string;
+  turnId?: string;
   resolution: NlaInteractionPayload;
 }
 
@@ -284,6 +296,7 @@ export interface NlaSessionInterruptResultData {
 
 export interface NlaSessionStatusData {
   sessionId: string;
+  turnId?: string;
   status: NlaSessionStatus;
   label?: string;
   data?: unknown;
@@ -464,8 +477,8 @@ export type NlaSessionStartMessage = NlaEnvelope<"session.start", NlaSessionStar
 export type NlaSessionResumeMessage = NlaEnvelope<"session.resume", NlaSessionResumeData>;
 export type NlaSessionMessage = NlaEnvelope<"session.message", NlaSessionMessageData>;
 export type NlaSessionMessageDelta = NlaEnvelope<"session.message.delta", NlaSessionMessageDeltaData>;
-export type NlaSessionActivityMessage = NlaEnvelope<"session.activity", NlaActivityData>;
-export type NlaSessionArtifactMessage = NlaEnvelope<"session.artifact", NlaArtifactData>;
+export type NlaSessionActivityMessage = NlaEnvelope<"session.activity", NlaSessionActivityData>;
+export type NlaSessionArtifactMessage = NlaEnvelope<"session.artifact", NlaSessionArtifactData>;
 export type NlaSessionInteractionRequestedMessage = NlaEnvelope<"session.interaction.requested", NlaSessionInteractionRequestedData>;
 export type NlaSessionInteractionResolveMessage = NlaEnvelope<"session.interaction.resolve", NlaSessionInteractionResolveData>;
 export type NlaSessionInteractionResolvedMessage = NlaEnvelope<"session.interaction.resolved", NlaSessionInteractionResolvedData>;
@@ -629,12 +642,16 @@ export function validateNlaMessage(value: unknown): NlaValidationResult<NlaMessa
       validateInvokeLogData(data, errors, "data");
       break;
     case "invoke.activity":
-    case "session.activity":
       validateActivityData(data, errors, "data");
       break;
+    case "session.activity":
+      validateSessionActivityData(data, errors, "data");
+      break;
     case "invoke.artifact":
-    case "session.artifact":
       validateArtifactData(data, errors, "data");
+      break;
+    case "session.artifact":
+      validateSessionArtifactData(data, errors, "data");
       break;
     case "invoke.completed":
       validateCompletedData(data, errors, "data");
@@ -907,6 +924,15 @@ function validateActivityData(
   requiredString(data, "status", errors, `${path}.status`);
 }
 
+function validateSessionActivityData(
+  data: Record<string, unknown>,
+  errors: NlaValidationIssue[],
+  path: string
+): void {
+  validateActivityData(data, errors, path);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
+}
+
 function validateArtifactData(
   data: Record<string, unknown>,
   errors: NlaValidationIssue[],
@@ -918,6 +944,15 @@ function validateArtifactData(
   optionalString(data, "mimeType", errors, `${path}.mimeType`);
   optionalString(data, "uri", errors, `${path}.uri`);
   optionalRecord(data, "metadata", errors, `${path}.metadata`);
+}
+
+function validateSessionArtifactData(
+  data: Record<string, unknown>,
+  errors: NlaValidationIssue[],
+  path: string
+): void {
+  validateArtifactData(data, errors, path);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
 }
 
 function validateCompletedData(
@@ -994,6 +1029,7 @@ function validateSessionMessageData(
   path: string
 ): void {
   requiredString(data, "sessionId", errors, `${path}.sessionId`);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
   requiredString(data, "role", errors, `${path}.role`);
   optionalString(data, "text", errors, `${path}.text`);
   optionalRecord(data, "metadata", errors, `${path}.metadata`);
@@ -1022,6 +1058,7 @@ function validateSessionMessageDeltaData(
   path: string
 ): void {
   requiredString(data, "sessionId", errors, `${path}.sessionId`);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
   requiredString(data, "messageId", errors, `${path}.messageId`);
   requiredString(data, "role", errors, `${path}.role`);
   requiredString(data, "delta", errors, `${path}.delta`);
@@ -1034,6 +1071,7 @@ function validateSessionInteractionRequestedData(
   path: string
 ): void {
   requiredString(data, "sessionId", errors, `${path}.sessionId`);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
   const request = asRecord(data.request, `${path}.request`, errors);
   if (!request) {
     return;
@@ -1063,6 +1101,7 @@ function validateSessionInteractionResolvedData(
   path: string
 ): void {
   requiredString(data, "sessionId", errors, `${path}.sessionId`);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
   const resolution = asRecord(data.resolution, `${path}.resolution`, errors);
   if (!resolution) {
     return;
@@ -1098,6 +1137,7 @@ function validateSessionStatusData(
   path: string
 ): void {
   requiredString(data, "sessionId", errors, `${path}.sessionId`);
+  optionalString(data, "turnId", errors, `${path}.turnId`);
   requiredString(data, "status", errors, `${path}.status`);
   optionalString(data, "label", errors, `${path}.label`);
 }
