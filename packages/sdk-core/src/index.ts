@@ -34,6 +34,7 @@ import {
   type NlaSessionFailedMessage,
   type NlaSessionMessage,
   type NlaSessionMessageData,
+  type NlaSessionMessagePart,
   type NlaSessionMessageDeltaData,
   type NlaSessionControlsGetMessage,
   type NlaSessionInteractionRequestedData,
@@ -183,6 +184,12 @@ export interface NlaSessionEmitterOptions {
   turnId?: string;
 }
 
+export interface NlaSessionReplyData {
+  readonly text?: string;
+  readonly parts?: ReadonlyArray<NlaSessionMessagePart>;
+  readonly metadata?: Record<string, unknown>;
+}
+
 export interface NlaSessionEmitterContext {
   readonly adapter: NlaAdapterIdentity;
   readonly session: NlaRuntimeSession;
@@ -204,6 +211,7 @@ export interface NlaSessionEmitterContext {
   execution(execution: Omit<NlaSessionExecutionData, "sessionId">): void;
   message(message: Omit<NlaSessionMessageData, "sessionId">): void;
   reply(text: string, metadata?: Record<string, unknown>): void;
+  reply(reply: NlaSessionReplyData): void;
   messageDelta(message: Omit<NlaSessionMessageDeltaData, "sessionId">): void;
   activity(activity: NlaSessionActivityData): void;
   artifact(artifact: NlaSessionArtifactData): void;
@@ -236,6 +244,7 @@ export interface NlaSessionHandlerContext
   execution(execution: Omit<NlaSessionExecutionData, "sessionId">): void;
   message(message: Omit<NlaSessionMessageData, "sessionId">): void;
   reply(text: string, metadata?: Record<string, unknown>): void;
+  reply(reply: NlaSessionReplyData): void;
   messageDelta(message: Omit<NlaSessionMessageDeltaData, "sessionId">): void;
   controls(controls: ReadonlyArray<NlaSessionControlDefinition>): void;
   controlState(state: Omit<NlaSessionControlStateData, "sessionId">): void;
@@ -1023,12 +1032,12 @@ class AdapterRuntime implements NlaAdapterRuntime {
             ...message
           }, defaultTurnId));
         },
-        reply: (text, metadata) => {
+        reply: (textOrReply: string | NlaSessionReplyData, metadata?: Record<string, unknown>) => {
+          const reply = toSessionMessageReplyData(normalizeSessionReply(textOrReply, metadata));
           const eventData = withDefaultTurnId<NlaSessionMessageData>({
             sessionId: session.id,
             role: "assistant",
-            text,
-            metadata
+            ...reply
           }, defaultTurnId);
           emit("session.message", eventData);
         },
@@ -1385,9 +1394,8 @@ function errorMessage(error: unknown): string {
 
 export type NlaToolLoopRole = "system" | "user" | "assistant" | "tool";
 
-export interface NlaToolLoopMessage {
+export interface NlaToolLoopMessage extends NlaSessionReplyData {
   readonly role: NlaToolLoopRole;
-  readonly text: string;
   readonly toolName?: string;
   readonly toolCallId?: string;
   readonly toolInput?: unknown;
@@ -1405,12 +1413,14 @@ export interface NlaToolLoopToolCall {
   readonly input: unknown;
 }
 
+export interface NlaToolLoopAssistantResponse extends NlaSessionReplyData {
+  readonly deltas?: ReadonlyArray<string>;
+}
+
 export type NlaToolLoopResponse =
   | {
       readonly type: "assistant";
-      readonly text: string;
-      readonly deltas?: ReadonlyArray<string>;
-    }
+    } & NlaToolLoopAssistantResponse
   | {
       readonly type: "tool_calls";
       readonly calls: ReadonlyArray<NlaToolLoopToolCall>;
@@ -1420,11 +1430,11 @@ export type NlaToolLoopStreamEvent =
   | {
       readonly type: "assistant.delta";
       readonly delta: string;
+      readonly metadata?: Record<string, unknown>;
     }
-  | {
+  | ({
       readonly type: "assistant.completed";
-      readonly text: string;
-    }
+    } & NlaSessionReplyData)
   | {
       readonly type: "tool_calls";
       readonly calls: ReadonlyArray<NlaToolLoopToolCall>;
@@ -1435,10 +1445,18 @@ export interface NlaToolLoopRequest {
   readonly tools: ReadonlyArray<NlaToolLoopToolSpec>;
 }
 
+export interface NlaToolLoopRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface NlaToolLoopModel {
-  readonly respond: (request: NlaToolLoopRequest) => Promise<NlaToolLoopResponse>;
+  readonly respond: (
+    request: NlaToolLoopRequest,
+    options?: NlaToolLoopRequestOptions
+  ) => Promise<NlaToolLoopResponse>;
   readonly streamRespond?: (
-    request: NlaToolLoopRequest
+    request: NlaToolLoopRequest,
+    options?: NlaToolLoopRequestOptions
   ) => Promise<AsyncIterable<NlaToolLoopStreamEvent>> | AsyncIterable<NlaToolLoopStreamEvent>;
 }
 
@@ -1456,9 +1474,11 @@ export interface NlaSessionToolContextBase {
   readonly userMessageId?: string;
   readonly assistantMessageId: string;
   readonly text: string;
+  readonly parts: ReadonlyArray<NlaSessionMessagePart>;
   readonly session: NlaRuntimeSession;
   readonly request: NlaSessionMessage;
   readonly raw: NlaSessionHandlerContext;
+  readonly signal: AbortSignal;
   status(status: NlaSessionStatus, label?: string, data?: unknown): void;
   execution(execution: Omit<NlaSessionExecutionData, "sessionId">): void;
   activity(activity: NlaActivityData): void;
@@ -1466,6 +1486,7 @@ export interface NlaSessionToolContextBase {
   awaitInput(request: NlaInteractionPayload): Promise<NlaSessionInteractionResolveData>;
   assistantDelta(delta: string, metadata?: Record<string, unknown>): void;
   reply(text: string, metadata?: Record<string, unknown>): void;
+  reply(reply: NlaSessionReplyData): void;
 }
 
 export interface NlaSessionToolDefinition<TContext, TInput = unknown, TOutput = unknown> {
@@ -1478,7 +1499,9 @@ export interface NlaSessionToolDefinition<TContext, TInput = unknown, TOutput = 
 
 export interface NlaToolLoopSessionMemoryMessage {
   readonly role: "user" | "assistant";
-  readonly text: string;
+  readonly text?: string;
+  readonly parts?: ReadonlyArray<NlaSessionMessagePart>;
+  readonly metadata?: Record<string, unknown>;
 }
 
 export interface NlaToolLoopSessionMemoryState {
@@ -1528,13 +1551,12 @@ export const tool = <TContext, TInput = unknown, TOutput = unknown>(
 ): NlaSessionToolDefinition<TContext, TInput, TOutput> => definition;
 
 export interface NlaToolLoopCallbacks {
-  readonly onAssistantDelta?: (delta: string) => MaybePromise<void>;
+  readonly onAssistantDelta?: (delta: string, metadata?: Record<string, unknown>) => MaybePromise<void>;
   readonly onToolCallStart?: (call: NlaToolLoopToolCall) => MaybePromise<void>;
   readonly onToolCallCompleted?: (call: NlaToolLoopToolCall, output: unknown) => MaybePromise<void>;
 }
 
-export interface NlaToolLoopRunResult {
-  readonly text: string;
+export interface NlaToolLoopRunResult extends NlaSessionReplyData {
   readonly messages: ReadonlyArray<NlaToolLoopMessage>;
 }
 
@@ -1560,6 +1582,11 @@ interface PendingToolLoopInput {
   readonly reject: (error: Error) => void;
 }
 
+interface ActiveToolLoopTurn {
+  readonly turnId?: string;
+  readonly controller: AbortController;
+}
+
 const DefaultToolLoopSessionMemoryRecentMessages = 8;
 
 class ToolLoopAwaitInputStoppedError extends Error {
@@ -1568,6 +1595,51 @@ class ToolLoopAwaitInputStoppedError extends Error {
     this.name = "ToolLoopAwaitInputStoppedError";
   }
 }
+
+class ToolLoopInterruptedError extends Error {
+  constructor(
+    sessionId: string,
+    readonly turnId?: string
+  ) {
+    super(
+      turnId
+        ? `Tool loop interrupted for session ${sessionId} (turn ${turnId})`
+        : `Tool loop interrupted for session ${sessionId}`
+    );
+    this.name = "ToolLoopInterruptedError";
+  }
+}
+
+class ToolLoopStoppedError extends Error {
+  constructor(sessionId: string) {
+    super(`Tool loop stopped for session ${sessionId}`);
+    this.name = "ToolLoopStoppedError";
+  }
+}
+
+const toolLoopAbortReason = (signal: AbortSignal | undefined): Error | undefined => {
+  if (!signal?.aborted) {
+    return undefined;
+  }
+
+  const reason = signal.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+
+  if (typeof reason === "string" && reason.trim()) {
+    return new Error(reason);
+  }
+
+  return new Error("Tool loop aborted");
+};
+
+const throwIfToolLoopAborted = (signal: AbortSignal | undefined): void => {
+  const reason = toolLoopAbortReason(signal);
+  if (reason) {
+    throw reason;
+  }
+};
 
 export class NlaToolLoop {
   readonly #model: NlaToolLoopModel;
@@ -1589,18 +1661,23 @@ export class NlaToolLoop {
   async run(input: {
     readonly messages: ReadonlyArray<NlaToolLoopMessage>;
     readonly callbacks?: NlaToolLoopCallbacks;
+    readonly signal?: AbortSignal;
   }): Promise<NlaToolLoopRunResult> {
     let messages = [...input.messages];
 
     for (let iteration = 0; iteration < this.#maxIterations; iteration += 1) {
+      throwIfToolLoopAborted(input.signal);
       const response = await this.#runModel({
         messages,
         tools: this.#toolSpecs
-      }, input.callbacks);
+      }, input.callbacks, input.signal);
+      throwIfToolLoopAborted(input.signal);
 
       if (response.type === "assistant") {
         return {
           text: response.text,
+          parts: response.parts,
+          metadata: response.metadata,
           messages
         };
       }
@@ -1615,7 +1692,9 @@ export class NlaToolLoop {
       messages = [...messages, ...assistantToolMessages];
 
       for (const call of response.calls) {
+        throwIfToolLoopAborted(input.signal);
         const output = await this.#executeToolCall(call, input.callbacks);
+        throwIfToolLoopAborted(input.signal);
         messages = [
           ...messages,
           {
@@ -1633,10 +1712,14 @@ export class NlaToolLoop {
 
   async #runModel(
     request: NlaToolLoopRequest,
-    callbacks: NlaToolLoopCallbacks | undefined
+    callbacks: NlaToolLoopCallbacks | undefined,
+    signal: AbortSignal | undefined
   ): Promise<NlaToolLoopResponse> {
+    throwIfToolLoopAborted(signal);
+
     if (!this.#model.streamRespond) {
-      const response = await this.#model.respond(request);
+      const response = await this.#model.respond(request, { signal });
+      throwIfToolLoopAborted(signal);
       if (response.type === "assistant") {
         for (const delta of response.deltas ?? []) {
           await callbacks?.onAssistantDelta?.(delta);
@@ -1645,18 +1728,21 @@ export class NlaToolLoop {
       return response;
     }
 
-    const events = await this.#model.streamRespond(request);
+    const events = await this.#model.streamRespond(request, { signal });
     let terminal: NlaToolLoopResponse | undefined;
 
     for await (const event of events) {
+      throwIfToolLoopAborted(signal);
       switch (event.type) {
         case "assistant.delta":
-          await callbacks?.onAssistantDelta?.(event.delta);
+          await callbacks?.onAssistantDelta?.(event.delta, event.metadata);
           break;
         case "assistant.completed":
           terminal = {
             type: "assistant",
-            text: event.text
+            text: event.text,
+            parts: event.parts,
+            metadata: event.metadata
           };
           break;
         case "tool_calls":
@@ -1667,6 +1753,8 @@ export class NlaToolLoop {
           break;
       }
     }
+
+    throwIfToolLoopAborted(signal);
 
     if (!terminal) {
       throw new Error("Tool loop model stream ended without a terminal event");
@@ -1701,6 +1789,7 @@ export function defineToolLoopSessionAdapter<TContext>(
   definition: NlaToolLoopSessionAdapterDefinition<TContext>
 ): NlaAdapterDefinition {
   const pendingInputsBySession = new Map<string, Map<string, PendingToolLoopInput>>();
+  const activeTurnsBySession = new Map<string, ActiveToolLoopTurn>();
 
   const getSessionPendingInputs = (sessionId: string): Map<string, PendingToolLoopInput> => {
     let pending = pendingInputsBySession.get(sessionId);
@@ -1733,6 +1822,31 @@ export function defineToolLoopSessionAdapter<TContext>(
     for (const entry of pending.values()) {
       entry.reject(error);
     }
+  };
+
+  const clearActiveTurn = (sessionId: string, turn: ActiveToolLoopTurn): void => {
+    if (activeTurnsBySession.get(sessionId) === turn) {
+      activeTurnsBySession.delete(sessionId);
+    }
+  };
+
+  const findInterruptibleTurn = (
+    sessionId: string,
+    requestedTurnId?: string
+  ): ActiveToolLoopTurn | undefined => {
+    const activeTurn = activeTurnsBySession.get(sessionId);
+    if (!activeTurn) {
+      return undefined;
+    }
+
+    if (requestedTurnId) {
+      const activeTurnId = activeTurn.turnId?.trim();
+      if (!activeTurnId || activeTurnId !== requestedTurnId) {
+        return undefined;
+      }
+    }
+
+    return activeTurn;
   };
 
   const initializeSession = async (
@@ -1772,10 +1886,25 @@ export function defineToolLoopSessionAdapter<TContext>(
         return;
       }
 
-      const text = requireTextSessionMessage(message);
+      const userMessage = requireToolLoopSessionMessage(message);
       const metadata = asRecord(message.data.metadata);
       const assistantMessageId = optionalString(metadata?.assistantMessageId) ?? ctx.createId("msg");
       const sessionId = message.data.sessionId;
+      const turnId = optionalString(metadata?.turnId);
+      if (activeTurnsBySession.has(sessionId)) {
+        ctx.fail({
+          code: "session_busy",
+          message: "Tool loop session is already working on a turn."
+        });
+        return;
+      }
+
+      const activeTurn: ActiveToolLoopTurn = {
+        turnId,
+        controller: new AbortController()
+      };
+      activeTurnsBySession.set(sessionId, activeTurn);
+      const turnSignal = activeTurn.controller.signal;
       const responseCorrelation: ToolLoopCorrelationState = {
         current: requestCorrelationId(message, sessionId)
       };
@@ -1803,14 +1932,19 @@ export function defineToolLoopSessionAdapter<TContext>(
       const toolContextBase: NlaSessionToolContextBase = {
         sessionId,
         clientId: optionalString(metadata?.clientId) ?? "nla-host",
-        turnId: optionalString(metadata?.turnId),
+        turnId,
         userMessageId: optionalString(metadata?.userMessageId),
         assistantMessageId,
-        text,
+        text: userMessage.text ?? "",
+        parts: userMessage.parts ?? [],
         session: ctx.session,
         request: message,
         raw: ctx,
+        signal: turnSignal,
         status: (status, label, data) => {
+          if (turnSignal.aborted) {
+            return;
+          }
           emitSession("session.status", {
             sessionId,
             status,
@@ -1819,19 +1953,28 @@ export function defineToolLoopSessionAdapter<TContext>(
           });
         },
         execution: (execution) => {
+          if (turnSignal.aborted) {
+            return;
+          }
           emitSession("session.execution", {
             sessionId,
             ...execution
           });
         },
         activity: (activity) => {
+          if (turnSignal.aborted) {
+            return;
+          }
           emitSession("session.activity", activity);
         },
         requestInput: (request) => {
+          if (turnSignal.aborted) {
+            return;
+          }
           emitSession("session.execution", {
             sessionId,
             state: "awaiting_input",
-            turnId: optionalString(metadata?.turnId),
+            turnId,
             interruptible: true
           });
           emitSession("session.interaction.requested", {
@@ -1841,6 +1984,7 @@ export function defineToolLoopSessionAdapter<TContext>(
         },
         awaitInput: (request) =>
           new Promise<NlaSessionInteractionResolveData>((resolve, reject) => {
+            throwIfToolLoopAborted(turnSignal);
             const pending = getSessionPendingInputs(sessionId);
             if (pending.has(request.requestId)) {
               reject(new Error(`Duplicate pending input request: ${request.requestId}`));
@@ -1859,10 +2003,17 @@ export function defineToolLoopSessionAdapter<TContext>(
               }
             });
 
+            const abortReason = toolLoopAbortReason(turnSignal);
+            if (abortReason) {
+              deletePendingInput(sessionId, request.requestId);
+              reject(abortReason);
+              return;
+            }
+
             emitSession("session.execution", {
               sessionId,
               state: "awaiting_input",
-              turnId: optionalString(metadata?.turnId),
+              turnId,
               interruptible: true
             });
             emitSession("session.interaction.requested", {
@@ -1871,6 +2022,9 @@ export function defineToolLoopSessionAdapter<TContext>(
             });
           }),
         assistantDelta: (delta, deltaMetadata) => {
+          if (turnSignal.aborted) {
+            return;
+          }
           emitSession("session.message.delta", {
             sessionId,
             messageId: assistantMessageId,
@@ -1879,107 +2033,131 @@ export function defineToolLoopSessionAdapter<TContext>(
             metadata: deltaMetadata
           });
         },
-        reply: (replyText, replyMetadata) => {
+        reply: (replyTextOrMessage: string | NlaSessionReplyData, replyMetadata?: Record<string, unknown>) => {
+          if (turnSignal.aborted) {
+            return;
+          }
+          const reply = toSessionMessageReplyData(normalizeSessionReply(replyTextOrMessage, replyMetadata));
           emitSession("session.message", {
             sessionId,
             role: "assistant",
-            text: replyText,
-            metadata: replyMetadata
+            ...reply
           }, {
             id: assistantMessageId
           });
         }
       };
 
-      const adapterContext = definition.createContext
-        ? await definition.createContext(ctx, message)
-        : {} as TContext;
-      const toolContext = Object.assign({}, adapterContext, toolContextBase) as TContext & NlaSessionToolContextBase;
-      const loadedMemory = definition.memory
-        ? normalizeToolLoopSessionMemory(
-            await definition.memory.load(toolContext)
-          )
-        : undefined;
-      const model = typeof definition.model === "function"
-        ? definition.model(toolContext)
-        : definition.model;
-      const loop = new NlaToolLoop({
-        model,
-        tools: definition.tools.map((entry) => ({
-          name: entry.name,
-          description: entry.description,
-          inputSchema: entry.inputSchema,
-          execute: async (input) => {
-            const activityId = `tool:${entry.name}`;
-            toolContext.activity({
-              activityId,
-              title: `Tool ${entry.name}`,
-              status: "running"
-            });
-
-            try {
-              const decodedInput = entry.decode
-                ? entry.decode(input)
-                : input;
-              const output = await entry.execute(toolContext, decodedInput);
-              toolContext.activity({
-                activityId,
-                title: `Tool ${entry.name}`,
-                status: "succeeded"
-              });
-              return output;
-            } catch (error) {
-              toolContext.activity({
-                activityId,
-                title: `Tool ${entry.name}`,
-                status: "failed"
-              });
-              throw error;
-            }
-          }
-        })),
-        maxIterations: definition.maxIterations
-      });
-
+      let toolContext: TContext & NlaSessionToolContextBase;
+      let loadedMemory: NlaToolLoopSessionMemoryState | undefined;
+      let loop: NlaToolLoop;
       const messages: NlaToolLoopMessage[] = [];
-      if (definition.instructions?.trim()) {
-        messages.push({
-          role: "system",
-          text: definition.instructions.trim()
-        });
-      }
-      if (loadedMemory?.summary) {
-        messages.push({
-          role: "system",
-          text: formatToolLoopMemorySummary(definition.memory, loadedMemory.summary)
-        });
-      }
-      if (loadedMemory?.recent) {
-        messages.push(
-          ...loadedMemory.recent.map((entry) => ({
-            role: entry.role,
-            text: entry.text
-          }))
-        );
-      }
-      messages.push({
-        role: "user",
-        text
-      });
 
-      toolContext.execution({
-        state: "running",
-        turnId: toolContext.turnId,
-        interruptible: true
-      });
       try {
+        const adapterContext = definition.createContext
+          ? await definition.createContext(ctx, message)
+          : {} as TContext;
+        toolContext = Object.assign({}, adapterContext, toolContextBase) as TContext & NlaSessionToolContextBase;
+        loadedMemory = definition.memory
+          ? normalizeToolLoopSessionMemory(
+              await definition.memory.load(toolContext)
+            )
+          : undefined;
+        const model = typeof definition.model === "function"
+          ? definition.model(toolContext)
+          : definition.model;
+        loop = new NlaToolLoop({
+          model,
+          tools: definition.tools.map((entry) => ({
+            name: entry.name,
+            description: entry.description,
+            inputSchema: entry.inputSchema,
+            execute: async (input) => {
+              const activityId = `tool:${entry.name}`;
+              toolContext.activity({
+                activityId,
+                title: `Tool ${entry.name}`,
+                status: "running"
+              });
+
+              try {
+                const decodedInput = entry.decode
+                  ? entry.decode(input)
+                  : input;
+                const output = await entry.execute(toolContext, decodedInput);
+                toolContext.activity({
+                  activityId,
+                  title: `Tool ${entry.name}`,
+                  status: "succeeded"
+                });
+                return output;
+              } catch (error) {
+                toolContext.activity({
+                  activityId,
+                  title: `Tool ${entry.name}`,
+                  status: "failed"
+                });
+                throw error;
+              }
+            }
+          })),
+          maxIterations: definition.maxIterations
+        });
+
+        if (definition.instructions?.trim()) {
+          messages.push({
+            role: "system",
+            text: definition.instructions.trim()
+          });
+        }
+        if (loadedMemory?.summary) {
+          messages.push({
+            role: "system",
+            text: formatToolLoopMemorySummary(definition.memory, loadedMemory.summary)
+          });
+        }
+        if (loadedMemory?.recent) {
+          messages.push(
+            ...loadedMemory.recent.map((entry) => ({
+              role: entry.role,
+              text: entry.text,
+              parts: entry.parts,
+              metadata: entry.metadata
+            }))
+          );
+        }
+        messages.push({
+          role: "user",
+          text: userMessage.text,
+          parts: userMessage.parts
+        });
+      } catch (error) {
+        clearActiveTurn(sessionId, activeTurn);
+        if (turnSignal.aborted) {
+          return;
+        }
+
+        emitFailure({
+          code: "tool_loop_failed",
+          message: errorMessage(error)
+        });
+        return;
+      }
+
+      try {
+        toolContext.execution({
+          state: "running",
+          turnId: toolContext.turnId,
+          interruptible: true
+        });
         const result = await loop.run({
           messages,
           callbacks: {
-            onAssistantDelta: (delta) => {
-              toolContext.assistantDelta(delta);
+            onAssistantDelta: (delta, deltaMetadata) => {
+              toolContext.assistantDelta(delta, deltaMetadata);
             }
-          }
+          },
+          signal: turnSignal
         });
         if (definition.memory) {
           await definition.memory.save(
@@ -1990,21 +2168,32 @@ export function defineToolLoopSessionAdapter<TContext>(
                 ...(loadedMemory?.recent ?? []),
                 {
                   role: "user",
-                  text
+                  text: userMessage.text,
+                  parts: userMessage.parts
                 },
                 {
                   role: "assistant",
-                  text: result.text
+                  text: result.text,
+                  parts: result.parts,
+                  metadata: result.metadata
                 }
               ]
             })
           );
         }
-        toolContext.reply(result.text);
+        toolContext.reply({
+          text: result.text,
+          parts: result.parts,
+          metadata: result.metadata
+        });
         emitSession("session.completed", {
           sessionId
         });
       } catch (error) {
+        if (turnSignal.aborted) {
+          return;
+        }
+
         if (error instanceof ToolLoopAwaitInputStoppedError) {
           return;
         }
@@ -2013,6 +2202,8 @@ export function defineToolLoopSessionAdapter<TContext>(
           code: "tool_loop_failed",
           message: errorMessage(error)
         });
+      } finally {
+        clearActiveTurn(sessionId, activeTurn);
       }
     },
     sessionInput: async (ctx, message) => {
@@ -2043,8 +2234,44 @@ export function defineToolLoopSessionAdapter<TContext>(
         metadata: message.data.metadata
       });
     },
+    sessionInterrupt: (ctx, message) => {
+      const requestedTurnId = message.data.turnId?.trim() || undefined;
+      const activeTurn = findInterruptibleTurn(ctx.session.id, requestedTurnId);
+      if (!activeTurn) {
+        ctx.interruptResult({
+          status: "no_active_work",
+          turnId: requestedTurnId,
+          message: "No active tool loop turn."
+        });
+        return;
+      }
+
+      clearActiveTurn(ctx.session.id, activeTurn);
+      const error = new ToolLoopInterruptedError(ctx.session.id, activeTurn.turnId ?? requestedTurnId);
+      rejectPendingInputs(ctx.session.id, error);
+      if (!activeTurn.controller.signal.aborted) {
+        activeTurn.controller.abort(error);
+      }
+
+      ctx.interruptResult({
+        status: "interrupted",
+        turnId: activeTurn.turnId ?? requestedTurnId,
+        message: "Interrupted"
+      });
+    },
     sessionStop: (ctx) => {
-      rejectPendingInputs(ctx.session.id, new ToolLoopAwaitInputStoppedError(ctx.session.id));
+      const activeTurn = activeTurnsBySession.get(ctx.session.id);
+      if (activeTurn) {
+        clearActiveTurn(ctx.session.id, activeTurn);
+        const error = new ToolLoopStoppedError(ctx.session.id);
+        rejectPendingInputs(ctx.session.id, error);
+        if (!activeTurn.controller.signal.aborted) {
+          activeTurn.controller.abort(error);
+        }
+      } else {
+        rejectPendingInputs(ctx.session.id, new ToolLoopAwaitInputStoppedError(ctx.session.id));
+      }
+
       ctx.stopped();
     }
   });
@@ -2093,7 +2320,10 @@ function normalizeToolLoopSessionMemory(
     ? value.summary.trim()
     : undefined;
   const recent = Array.isArray(value.recent)
-    ? value.recent.flatMap((entry) => normalizeToolLoopSessionMemoryMessage(entry) ? [entry] : [])
+    ? value.recent.flatMap((entry) => {
+        const normalized = normalizeToolLoopSessionMemoryMessage(entry);
+        return normalized ? [normalized] : [];
+      })
     : [];
 
   if (!summary && recent.length === 0) {
@@ -2108,17 +2338,29 @@ function normalizeToolLoopSessionMemory(
 
 function normalizeToolLoopSessionMemoryMessage(
   value: unknown
-): value is NlaToolLoopSessionMemoryMessage {
+): NlaToolLoopSessionMemoryMessage | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
+    return undefined;
   }
 
   const record = value as Record<string, unknown>;
-  return (
-    (record.role === "user" || record.role === "assistant")
-    && typeof record.text === "string"
-    && record.text.trim().length > 0
-  );
+  if (record.role !== "user" && record.role !== "assistant") {
+    return undefined;
+  }
+
+  const content = normalizeMessageContent({
+    text: record.text,
+    parts: record.parts,
+    metadata: record.metadata
+  });
+  if (!content) {
+    return undefined;
+  }
+
+  return {
+    role: record.role,
+    ...content
+  };
 }
 
 async function compactToolLoopSessionMemory<TContext>(
@@ -2164,25 +2406,137 @@ function formatToolLoopMemorySummary<TContext>(
     : `Conversation summary:\n${text}`;
 }
 
-function requireTextSessionMessage(message: NlaSessionMessage): string {
-  if (typeof message.data.text === "string" && message.data.text.trim()) {
-    return message.data.text.trim();
+function requireToolLoopSessionMessage(message: NlaSessionMessage): NlaSessionReplyData {
+  const content = normalizeMessageContent({
+    text: message.data.text,
+    parts: message.data.parts
+  });
+
+  if (content) {
+    return content;
   }
 
-  if (Array.isArray(message.data.parts) && message.data.parts.length > 0) {
-    const text = message.data.parts.map((part) => {
-      if (part.type !== "text" || typeof part.text !== "string") {
-        throw new Error("Tool loop session adapters only support text session.message parts");
-      }
-      return part.text;
-    }).join("").trim();
+  throw new Error("Tool loop session adapters require non-empty text or at least one valid session.message part");
+}
 
-    if (text) {
-      return text;
+function normalizeSessionReply(
+  textOrReply: string | NlaSessionReplyData,
+  metadata?: Record<string, unknown>
+): NlaSessionReplyData {
+  if (typeof textOrReply === "string") {
+    return metadata
+      ? {
+          text: textOrReply,
+          metadata
+        }
+      : {
+          text: textOrReply
+        };
+  }
+
+  return normalizeMessageContent(textOrReply, {
+    allowEmptyText: true
+  }) ?? {};
+}
+
+function toSessionMessageReplyData(
+  reply: NlaSessionReplyData
+): Pick<NlaSessionMessageData, "text" | "parts" | "metadata"> {
+  const parts = reply.parts
+    ? reply.parts.map((part) => ({
+        ...part
+      }))
+    : undefined;
+
+  return {
+    ...(reply.text !== undefined ? { text: reply.text } : {}),
+    ...(parts ? { parts } : {}),
+    ...(reply.metadata ? { metadata: reply.metadata } : {})
+  };
+}
+
+function normalizeMessageContent(
+  value: {
+    readonly text?: unknown;
+    readonly parts?: unknown;
+    readonly metadata?: unknown;
+  },
+  options: {
+    readonly allowEmptyText?: boolean;
+  } = {}
+): NlaSessionReplyData | undefined {
+  const parts = normalizeSessionMessageParts(value.parts);
+  const text =
+    normalizeMessageText(value.text, options.allowEmptyText === true)
+    ?? textFromMessageParts(parts, options.allowEmptyText === true);
+  const metadata = asRecord(value.metadata);
+
+  if (!text && !parts) {
+    return undefined;
+  }
+
+  return {
+    ...(text !== undefined ? { text } : {}),
+    ...(parts ? { parts } : {}),
+    ...(metadata ? { metadata } : {})
+  };
+}
+
+function normalizeMessageText(
+  value: unknown,
+  allowEmpty: boolean
+): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  if (allowEmpty) {
+    return value;
+  }
+
+  return value.trim() ? value.trim() : undefined;
+}
+
+function normalizeSessionMessageParts(
+  value: unknown
+): ReadonlyArray<NlaSessionMessagePart> | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+
+  return value.map((part, index) => {
+    const record = asRecord(part);
+    const type = optionalString(record?.type);
+    if (!record || !type) {
+      throw new Error(`Invalid session.message part at index ${index}`);
     }
+
+    return {
+      ...record,
+      type
+    } satisfies NlaSessionMessagePart;
+  });
+}
+
+function textFromMessageParts(
+  parts: ReadonlyArray<NlaSessionMessagePart> | undefined,
+  allowEmpty: boolean
+): string | undefined {
+  if (!parts || parts.length === 0) {
+    return undefined;
   }
 
-  throw new Error("Tool loop session adapters require a non-empty text session.message");
+  const text = parts.map((part) =>
+    part.type === "text" && typeof part.text === "string"
+      ? part.text
+      : ""
+  ).join("");
+
+  if (allowEmpty) {
+    return text;
+  }
+
+  return text.trim() ? text.trim() : undefined;
 }
 
 function requestCorrelationId(
