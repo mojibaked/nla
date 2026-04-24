@@ -1405,6 +1405,22 @@ export interface NlaToolLoopToolSpec {
   readonly name: string;
   readonly description: string;
   readonly inputSchema?: Record<string, unknown>;
+  readonly outputReduction?: NlaToolLoopToolOutputReduction;
+}
+
+export type NlaToolLoopToolOutputReductionStrategy =
+  | "auto"
+  | "json"
+  | "json-array"
+  | "json-object"
+  | "head-tail"
+  | "exact";
+
+export interface NlaToolLoopToolOutputReduction {
+  readonly strategy?: NlaToolLoopToolOutputReductionStrategy;
+  readonly preserveFields?: ReadonlyArray<string>;
+  readonly sampleFirst?: number;
+  readonly sampleLast?: number;
 }
 
 export interface NlaToolLoopToolCall {
@@ -1447,6 +1463,7 @@ export interface NlaToolLoopRequest {
 
 export interface NlaToolLoopRequestOptions {
   readonly signal?: AbortSignal;
+  readonly turnId?: string;
 }
 
 export interface NlaToolLoopModel {
@@ -1464,6 +1481,7 @@ export interface NlaToolLoopTool<TInput = unknown, TOutput = unknown> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema?: Record<string, unknown>;
+  readonly outputReduction?: NlaToolLoopToolOutputReduction;
   readonly execute: (input: TInput) => Promise<TOutput>;
 }
 
@@ -1493,6 +1511,7 @@ export interface NlaSessionToolDefinition<TContext, TInput = unknown, TOutput = 
   readonly name: string;
   readonly description: string;
   readonly inputSchema?: Record<string, unknown>;
+  readonly outputReduction?: NlaToolLoopToolOutputReduction;
   readonly decode?: (input: unknown) => TInput;
   readonly execute: (context: TContext & NlaSessionToolContextBase, input: TInput) => MaybePromise<TOutput>;
 }
@@ -1543,6 +1562,7 @@ export interface NlaToolLoopSessionAdapterDefinition<TContext> {
   ) => MaybePromise<TContext>;
   readonly onSessionStart?: (ctx: NlaSessionHandlerContext) => MaybePromise<void>;
   readonly onSessionResume?: (ctx: NlaSessionHandlerContext) => MaybePromise<void>;
+  readonly onSessionStop?: (ctx: NlaSessionHandlerContext) => MaybePromise<void>;
   readonly memory?: NlaToolLoopSessionMemoryStore<TContext>;
 }
 
@@ -1654,7 +1674,8 @@ export class NlaToolLoop {
     this.#toolSpecs = options.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: tool.inputSchema
+      inputSchema: tool.inputSchema,
+      outputReduction: tool.outputReduction
     }));
   }
 
@@ -1662,6 +1683,7 @@ export class NlaToolLoop {
     readonly messages: ReadonlyArray<NlaToolLoopMessage>;
     readonly callbacks?: NlaToolLoopCallbacks;
     readonly signal?: AbortSignal;
+    readonly turnId?: string;
   }): Promise<NlaToolLoopRunResult> {
     let messages = [...input.messages];
 
@@ -1670,7 +1692,7 @@ export class NlaToolLoop {
       const response = await this.#runModel({
         messages,
         tools: this.#toolSpecs
-      }, input.callbacks, input.signal);
+      }, input.callbacks, input.signal, input.turnId);
       throwIfToolLoopAborted(input.signal);
 
       if (response.type === "assistant") {
@@ -1713,12 +1735,13 @@ export class NlaToolLoop {
   async #runModel(
     request: NlaToolLoopRequest,
     callbacks: NlaToolLoopCallbacks | undefined,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    turnId: string | undefined
   ): Promise<NlaToolLoopResponse> {
     throwIfToolLoopAborted(signal);
 
     if (!this.#model.streamRespond) {
-      const response = await this.#model.respond(request, { signal });
+      const response = await this.#model.respond(request, { signal, turnId });
       throwIfToolLoopAborted(signal);
       if (response.type === "assistant") {
         for (const delta of response.deltas ?? []) {
@@ -1728,7 +1751,7 @@ export class NlaToolLoop {
       return response;
     }
 
-    const events = await this.#model.streamRespond(request, { signal });
+    const events = await this.#model.streamRespond(request, { signal, turnId });
     let terminal: NlaToolLoopResponse | undefined;
 
     for await (const event of events) {
@@ -2072,6 +2095,7 @@ export function defineToolLoopSessionAdapter<TContext>(
             name: entry.name,
             description: entry.description,
             inputSchema: entry.inputSchema,
+            outputReduction: entry.outputReduction,
             execute: async (input) => {
               const activityId = `tool:${entry.name}`;
               toolContext.activity({
@@ -2157,7 +2181,8 @@ export function defineToolLoopSessionAdapter<TContext>(
               toolContext.assistantDelta(delta, deltaMetadata);
             }
           },
-          signal: turnSignal
+          signal: turnSignal,
+          turnId: toolContext.turnId
         });
         if (definition.memory) {
           await definition.memory.save(
@@ -2259,7 +2284,7 @@ export function defineToolLoopSessionAdapter<TContext>(
         message: "Interrupted"
       });
     },
-    sessionStop: (ctx) => {
+    sessionStop: async (ctx) => {
       const activeTurn = activeTurnsBySession.get(ctx.session.id);
       if (activeTurn) {
         clearActiveTurn(ctx.session.id, activeTurn);
@@ -2272,6 +2297,7 @@ export function defineToolLoopSessionAdapter<TContext>(
         rejectPendingInputs(ctx.session.id, new ToolLoopAwaitInputStoppedError(ctx.session.id));
       }
 
+      await definition.onSessionStop?.(ctx);
       ctx.stopped();
     }
   });

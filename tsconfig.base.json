@@ -12,6 +12,9 @@
       "@nla/protocol": [
         "packages/protocol/src/index.ts"
       ],
+      "@nla/delegation": [
+        "packages/delegation/src/index.ts"
+      ],
       "@nla/host-core": [
         "packages/host-core/src/index.ts"
       ],

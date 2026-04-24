@@ -9,6 +9,7 @@ import {
 import type { NlaSessionTransportHandle } from "@nla/host-core";
 
 type JsonlChildProcess = ChildProcessByStdio<Writable, Readable, Readable>;
+const ProcessTreeStopGraceMs = 1_000;
 
 export interface OpenJsonlChildTransportInput {
   readonly sessionId: string;
@@ -29,6 +30,7 @@ export function openJsonlChildTransport(
       ...process.env,
       ...input.env
     },
+    detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"]
   } as const);
 
@@ -42,6 +44,7 @@ export function openJsonlChildTransport(
   });
   const stderrLines: string[] = [];
   let closed = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
 
   const asError = (error: unknown): Error =>
     error instanceof Error ? error : new Error(String(error));
@@ -63,6 +66,37 @@ export function openJsonlChildTransport(
     }
   };
 
+  const clearKillTimer = (): void => {
+    if (killTimer) {
+      clearTimeout(killTimer);
+      killTimer = undefined;
+    }
+  };
+
+  const signalProcessTree = (signal: NodeJS.Signals): void => {
+    if (typeof child.pid !== "number") {
+      return;
+    }
+
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") {
+          return;
+        }
+      }
+    }
+
+    try {
+      child.kill(signal);
+    } catch {
+      // Ignore teardown races when the process already exited.
+    }
+  };
+
   const close = (): void => {
     if (closed) {
       return;
@@ -78,13 +112,12 @@ export function openJsonlChildTransport(
       // Ignore teardown races when the process already exited.
     }
 
-    if (!child.killed) {
-      try {
-        child.kill();
-      } catch {
-        // Ignore teardown races when the process already exited.
-      }
-    }
+    signalProcessTree("SIGTERM");
+    killTimer = setTimeout(() => {
+      killTimer = undefined;
+      signalProcessTree("SIGKILL");
+    }, ProcessTreeStopGraceMs);
+    killTimer.unref?.();
   };
 
   const fail = (error: Error): void => {
@@ -137,6 +170,9 @@ export function openJsonlChildTransport(
   });
 
   child.on("exit", (code, signal) => {
+    if (!closed || process.platform === "win32") {
+      clearKillTimer();
+    }
     if (closed) {
       return;
     }
