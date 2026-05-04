@@ -330,10 +330,10 @@ const requestTurnId = (
   return undefined;
 };
 
-const withDefaultTurnId = <T extends { turnId?: string }>(
-  value: T,
+const withDefaultTurnId = <T extends object>(
+  value: T & { readonly turnId?: string },
   defaultTurnId?: string
-): T => {
+): T & { readonly turnId?: string } => {
   if (!defaultTurnId) {
     return value;
   }
@@ -1913,7 +1913,7 @@ export function defineToolLoopSessionAdapter<TContext>(
       const metadata = asRecord(message.data.metadata);
       const assistantMessageId = optionalString(metadata?.assistantMessageId) ?? ctx.createId("msg");
       const sessionId = message.data.sessionId;
-      const turnId = optionalString(metadata?.turnId);
+      const turnId = optionalString(metadata?.turnId) ?? optionalString(message.data.turnId);
       if (activeTurnsBySession.has(sessionId)) {
         ctx.fail({
           code: "session_busy",
@@ -1968,27 +1968,27 @@ export function defineToolLoopSessionAdapter<TContext>(
           if (turnSignal.aborted) {
             return;
           }
-          emitSession("session.status", {
+          emitSession("session.status", withDefaultTurnId({
             sessionId,
             status,
             label,
             data
-          });
+          }, turnId));
         },
         execution: (execution) => {
           if (turnSignal.aborted) {
             return;
           }
-          emitSession("session.execution", {
+          emitSession("session.execution", withDefaultTurnId({
             sessionId,
             ...execution
-          });
+          }, turnId));
         },
         activity: (activity) => {
           if (turnSignal.aborted) {
             return;
           }
-          emitSession("session.activity", activity);
+          emitSession("session.activity", withDefaultTurnId(activity, turnId));
         },
         requestInput: (request) => {
           if (turnSignal.aborted) {
@@ -2000,10 +2000,10 @@ export function defineToolLoopSessionAdapter<TContext>(
             turnId,
             interruptible: true
           });
-          emitSession("session.interaction.requested", {
+          emitSession("session.interaction.requested", withDefaultTurnId({
             sessionId,
             request
-          });
+          }, turnId));
         },
         awaitInput: (request) =>
           new Promise<NlaSessionInteractionResolveData>((resolve, reject) => {
@@ -2039,33 +2039,33 @@ export function defineToolLoopSessionAdapter<TContext>(
               turnId,
               interruptible: true
             });
-            emitSession("session.interaction.requested", {
+            emitSession("session.interaction.requested", withDefaultTurnId({
               sessionId,
               request
-            });
+            }, turnId));
           }),
         assistantDelta: (delta, deltaMetadata) => {
           if (turnSignal.aborted) {
             return;
           }
-          emitSession("session.message.delta", {
+          emitSession("session.message.delta", withDefaultTurnId({
             sessionId,
             messageId: assistantMessageId,
             role: "assistant",
             delta,
             metadata: deltaMetadata
-          });
+          }, turnId));
         },
         reply: (replyTextOrMessage: string | NlaSessionReplyData, replyMetadata?: Record<string, unknown>) => {
           if (turnSignal.aborted) {
             return;
           }
           const reply = toSessionMessageReplyData(normalizeSessionReply(replyTextOrMessage, replyMetadata));
-          emitSession("session.message", {
+          emitSession("session.message", withDefaultTurnId({
             sessionId,
             role: "assistant",
             ...reply
-          }, {
+          }, turnId), {
             id: assistantMessageId
           });
         }

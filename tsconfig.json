@@ -11,6 +11,9 @@
       "path": "./packages/host-core"
     },
     {
+      "path": "./packages/context-assembler"
+    },
+    {
       "path": "./packages/sdk-core"
     },
     {

@@ -21,6 +21,117 @@ const waitFor = async (predicate, timeoutMs = 1000) => {
   throw new Error("Timed out waiting for condition");
 };
 
+test("sdk-core tool-loop sessions default active turnId onto turn-scoped events", async () => {
+  const runtime = createAdapterRuntime(defineToolLoopSessionAdapter({
+    id: "tool-loop-turn-events",
+    name: "Tool Loop Turn Events",
+    model: () => ({
+      async respond(request, options = {}) {
+        assert.equal(options.turnId, "turn_tool_loop_events");
+        const hasToolReply = request.messages.some((message) => message.role === "tool");
+        if (!hasToolReply) {
+          return {
+            type: "tool_calls",
+            calls: [
+              {
+                callId: "call:collect",
+                toolName: "collect",
+                input: {}
+              }
+            ]
+          };
+        }
+
+        return {
+          type: "assistant",
+          text: "done",
+          deltas: ["do", "ne"]
+        };
+      }
+    }),
+    tools: [
+      tool({
+        name: "collect",
+        description: "Collect turn-scoped event defaults.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false
+        },
+        execute: async (ctx) => {
+          assert.equal(ctx.turnId, "turn_tool_loop_events");
+          ctx.status("working", "Working");
+          ctx.execution({
+            state: "running",
+            interruptible: true
+          });
+          ctx.activity({
+            activityId: "manual",
+            title: "Manual activity",
+            status: "running"
+          });
+          ctx.requestInput({
+            kind: "approval",
+            requestId: "req:turn-events"
+          });
+          return {
+            ok: true
+          };
+        }
+      })
+    ]
+  }));
+
+  await runtime.handle(createEnvelope("session.start", {
+    sessionId: "sess_tool_loop_events"
+  }, {
+    correlationId: "start:sess_tool_loop_events"
+  }));
+
+  const messages = [];
+  await runtime.handleStream(createEnvelope("session.message", {
+    sessionId: "sess_tool_loop_events",
+    turnId: "turn_tool_loop_events",
+    role: "user",
+    text: "hello"
+  }, {
+    correlationId: "turn:sess_tool_loop_events"
+  }), (message) => {
+    messages.push(message);
+  });
+
+  const turnScoped = messages.filter((message) =>
+    [
+      "session.status",
+      "session.execution",
+      "session.activity",
+      "session.interaction.requested",
+      "session.message.delta",
+      "session.message"
+    ].includes(message.type)
+  );
+
+  assert.ok(turnScoped.length > 0);
+  assert.equal(
+    turnScoped.every((message) => message.data.turnId === "turn_tool_loop_events"),
+    true
+  );
+  assert.ok(messages.some((message) =>
+    message.type === "session.activity"
+    && message.data.activityId === "tool:collect"
+    && message.data.turnId === "turn_tool_loop_events"
+  ));
+  assert.ok(messages.some((message) =>
+    message.type === "session.activity"
+    && message.data.activityId === "manual"
+    && message.data.turnId === "turn_tool_loop_events"
+  ));
+  assert.ok(messages.some((message) =>
+    message.type === "session.interaction.requested"
+    && message.data.request.requestId === "req:turn-events"
+    && message.data.turnId === "turn_tool_loop_events"
+  ));
+});
+
 test("sdk-core tool-loop sessions interrupt an active model call", async () => {
   let observedSignal;
   const runtime = createAdapterRuntime(defineToolLoopSessionAdapter({

@@ -18,6 +18,9 @@
       "@nla/host-core": [
         "packages/host-core/src/index.ts"
       ],
+      "@nla/context-assembler": [
+        "packages/context-assembler/src/index.ts"
+      ],
       "@nla/sdk-core": [
         "packages/sdk-core/src/index.ts"
       ],

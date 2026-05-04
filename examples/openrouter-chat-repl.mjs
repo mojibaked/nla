@@ -110,8 +110,15 @@ export async function runOpenRouterChatRepl(options = {}) {
     output,
     terminal: Boolean(input.isTTY && output.isTTY)
   });
+  let readlineClosed = false;
+  rl.once("close", () => {
+    readlineClosed = true;
+  });
 
   const prompt = () => {
+    if (readlineClosed) {
+      return;
+    }
     rl.setPrompt("you> ");
     rl.prompt();
   };
